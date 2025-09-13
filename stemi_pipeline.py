@@ -1,16 +1,13 @@
 import os, sys, json, base64, cv2, numpy as np, requests
 
-# ==== CONFIG: fill these ====
 RF_API_KEY        = os.getenv("RF_API_KEY")
-MODEL_A_PRIME_ID  = "stemi_binary_detection-wojso/3"   # A′: STEMI vs Non-STEMI
-MODEL_A_ID        = "stemi-detection-9v28h/3"   # A:   {STE-C, STE-U, Normal, Abnormal, STE-Mimic}
-MODEL_B_ID        = "stemi_artery-xjdgh/1"   # B: LAD / LCX / RCA classifier
-# Thresholds (start here; tweak after a few cases)
-THR_STEMI      = 0.55   # binary gate (0.45–0.60)
-THR_CLEAR      = 0.60   # clear STEMI in A
-THR_SUM_AMBIG  = 0.75   # ambiguous if STE-C+STE-U above this
+MODEL_A_PRIME_ID  = "stemi_binary_detection-wojso/3"
+MODEL_A_ID        = "stemi-detection-9v28h/3"
+MODEL_B_ID        = "stemi_artery-xjdgh/1"
+THR_STEMI      = 0.55
+THR_CLEAR      = 0.60
+THR_SUM_AMBIG  = 0.75
 DEBUG = False
-# ============================
 
 def _pad_resize(gray, W=768, H=512):
     h, w = gray.shape[:2]
@@ -27,7 +24,7 @@ def preprocess(path):
     if img is None:
         raise FileNotFoundError(path)
     h, w = img.shape[:2]
-    if h > w:  # normalize: portrait -> landscape
+    if h > w:
         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.medianBlur(gray, 3)
@@ -36,7 +33,6 @@ def preprocess(path):
     return _pad_resize(gray, 768, 512)
 
 def preprocess_keep_as_is(path, target_w=768, target_h=512):
-    """No rotation/CLAHE; grayscale + letterbox only (to match how you may have tested Model B in the UI)."""
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(path)
@@ -54,7 +50,7 @@ def rf_classify_bytes(model_id, jpg_bytes):
     data = r.json()
     if DEBUG: print("[RF]", json.dumps(data)[:400])
     probs = {p["class"]: float(p.get("confidence",0.0)) for p in data.get("predictions", [])}
-    if not probs and "top" in data:  # fallback shape
+    if not probs and "top" in data:
         probs[data["top"]["class"]] = float(data["top"].get("confidence",0.0))
     return probs
 
@@ -78,16 +74,13 @@ def tta_probs(model_id, gray):
     return acc
 
 def decide_hierarchy(probs_bin, probs_5, probs_artery=None):
-    # --- A′ gate ---
     p_stemi = probs_bin.get("STEMI", probs_bin.get("stemi", 0.0))
     if p_stemi < THR_STEMI:
-        # Try to report strongest Non-STEMI subclass if available
         non = {k:v for k,v in probs_5.items() if k in ["Normal","Abnormal","STE-Mimic"]}
         top_non = max(non, key=non.get) if non else "Non-STEMI"
         return f"Non-STEMI ({top_non})", {"P_STEMI": round(p_stemi,3), "top_non": top_non,
                                         "p_top_non": round(non.get(top_non,0.0),3) if non else 0.0}
 
-    # --- A refine (only STEMI-relevant outputs) ---
     p_c = probs_5.get("STE-C", probs_5.get("ste-c", 0.0))
     p_u = probs_5.get("STE-U", probs_5.get("ste-u", 0.0))
 
@@ -95,12 +88,10 @@ def decide_hierarchy(probs_bin, probs_5, probs_artery=None):
         subtype = "STE-C" if p_c >= p_u else "STE-U"
         details = {"p_STE-C": round(p_c,3), "p_STE-U": round(p_u,3)}
         if probs_artery:
-            # Raw artery pick
             artery = max(probs_artery, key=probs_artery.get)
             pa = probs_artery
             details["artery_raw"] = artery
             details["artery_probs"] = {k: round(v,3) for k,v in pa.items()}
-            # Consistency rule: STE-C (anterior) rarely pairs with RCA. Require strong margin to keep RCA
             if subtype == "STE-C" and ("RCA" in pa and "LAD" in pa):
                 if pa["RCA"] < pa.get("LAD", 0.0) + 0.15:
                     artery = "LAD"
@@ -124,24 +115,17 @@ def decide_hierarchy(probs_bin, probs_5, probs_artery=None):
 
 def run(image_path):
     gray = preprocess(image_path)
-    # A′
     probs_bin = tta_probs(MODEL_A_PRIME_ID, gray)
-    # A
     probs_5 = tta_probs(MODEL_A_ID, gray)
     probs_artery = None
-    # Only run artery classifier when the binary gate passes and subtype is confidently clear
     p_stemi_bin = probs_bin.get("STEMI", probs_bin.get("stemi", 0.0))
     if p_stemi_bin >= THR_STEMI:
         p_c = probs_5.get("STE-C", probs_5.get("ste-c", 0.0))
         p_u = probs_5.get("STE-U", probs_5.get("ste-u", 0.0))
         if max(p_c, p_u) >= THR_CLEAR:
-            # --- Dual-view inference for Model B (artery) ---
-            # View A: standard preprocessed image used for A′/A
             probsA = tta_probs(MODEL_B_ID, gray)
-            # View B: original-aspect (no rotation/CLAHE), only letterboxed
             gray_orig = preprocess_keep_as_is(image_path, 768, 512)
             probsB = tta_probs(MODEL_B_ID, gray_orig)
-            # Pick the view with higher top-1 confidence
             (topA, confA) = pick_top(probsA)
             (topB, confB) = pick_top(probsB)
             probs_artery = probsA if confA >= confB else probsB
@@ -158,22 +142,17 @@ def run(image_path):
     }
     print(json.dumps(out, indent=2))
 
-# ---- Add this helper so we can call from an API ----
 def classify_path(image_path: str):
     gray = preprocess(image_path)
-    # A′
     probs_bin = tta_probs(MODEL_A_PRIME_ID, gray)
-    # A
     probs_5 = tta_probs(MODEL_A_ID, gray)
     probs_artery = None
 
-    # Only run artery classifier when the binary gate passes and subtype is confidently clear
     p_stemi_bin = probs_bin.get("STEMI", probs_bin.get("stemi", 0.0))
     if p_stemi_bin >= THR_STEMI:
         p_c = probs_5.get("STE-C", probs_5.get("ste-c", 0.0))
         p_u = probs_5.get("STE-U", probs_5.get("ste-u", 0.0))
         if max(p_c, p_u) >= THR_CLEAR:
-            # Dual-view inference for Model B (artery)
             probsA = tta_probs(MODEL_B_ID, gray)
             gray_orig = preprocess_keep_as_is(image_path, 768, 512)
             probsB = tta_probs(MODEL_B_ID, gray_orig)
