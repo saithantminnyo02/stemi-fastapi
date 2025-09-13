@@ -1,7 +1,7 @@
 import os, sys, json, base64, cv2, numpy as np, requests
 
 # ==== CONFIG: fill these ====
-RF_API_KEY        = "iGcuMhOntpBUnb5vE0BP"
+RF_API_KEY        = os.getenv("RF_API_KEY")
 MODEL_A_PRIME_ID  = "stemi_binary_detection-wojso/3"   # A′: STEMI vs Non-STEMI
 MODEL_A_ID        = "stemi-detection-9v28h/3"   # A:   {STE-C, STE-U, Normal, Abnormal, STE-Mimic}
 MODEL_B_ID        = "stemi_artery-xjdgh/1"   # B: LAD / LCX / RCA classifier
